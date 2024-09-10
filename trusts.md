@@ -10,12 +10,16 @@
 - Поддержка доверительных отношений с samba 
 - Процесс настройки доверительных отношений с использованием samba
 	+  Samba DC и Windows Server с AD
-		*  Windows Server с AD
-		*  Samba DC с BIND9_DLZ
+		*  Настройка DNS
+			*  Проверка конфигурации DNS
+		*  Создание двустороннего транзитивного подключения
+			*  Проверка доверия
 	+  Два домена Samba
 		*  Настройка DNS
+			*   Проверка конфигурации DNS
 		*  Создание двустороннего транзитивного подключения
-- Управление пользователями и группами
+			*  Проверка доверия
+	- Управление пользователями и группами
 	+ Список пользователей и групп
 	+ Тестирование аутентификации
 	+ ..
@@ -280,9 +284,9 @@
   Версия Samba - 4.19.7
 ___
 
-### Windows Server с AD
+#### Настройка DNS
 
-+ **Настройка DNS**
++ **Windows Server с AD**
 
 На AD сервере создать сервер условной пересылки для зоны Samba домена.
 
@@ -299,7 +303,139 @@ ___
 
 	PS$ Add-DnsServerConditionalForwarderZone -Name lin.loc -MasterServers 172.16.100.135 -ReplicationScope Forest
 
-+ **Создание двухстороннего транзитивного подключения:**
++ **Samba DC**
+1. Создать сервер условной перессылки для службы DNS. 
+
++ При использовании **DNS бэкенда BIND9_DLZ** добавить в конец файла /etc/bind/options.conf (или /etc/bind/ddns.conf) строки:
+
+	  	zone "win.dom" in {
+	  	type forward;
+   			forwarders { 10.64.224.116; };
+  		};
+  		
+  И перезапустить службу DNS:
+
+		# systemctl restart bind.service
+			
++ Если используется **DC с DNS бэкенд SAMBA_INTERNAL**, самый простой способ заставить работать разрешение имен — настроить DNS-прокси между двумя доменами. DNS-прокси будет перенаправлять запрос между доменами и внешним DNS-серверами. В примере, в качестве DNS-прокси используется отдельный сервер (IP-адрес 10.64.224.105) с настроенным bind9.
+
+На контроллере домена необходимо выполнить следующие действия:
+
+1. Указать DNS-прокси, как сервер пересылки в файле /etc/samba/smb.conf (в параметре dns forwarder). Например:
+
+		dns forwarder = 10.64.224.105 8.8.8.8
+
+2. Перезапустить службу samba:
+
+		# systemctl restart samba
+
+На сервере bind9:
+
+1. Отредактировать файл /etc/bind/options.conf:
+
+	+	Отключить проверку DNSSEC, для этого в секцию options добавить параметр:
+	
+			dnssec-validation no;
+			
+	+ В конец файла добавить информацию о зонах:
+	
+			zone "win.dom" in {
+	  			type forward;
+   				forwarders { 10.64.224.116; };
+  			};
+ 
+ 2. Перезапустить службу DNS:
+ 
+ 		# systemctl restart bind.service
+
+Подробнее про настройку домена можно прочесть в [документации ALT Linux Team](https://docs.altlinux.org/ru-RU/archive/9.0/html/alt-server/)
+
+> Если удалённый DNS-сервер не использует DNSSEC и включить проверку DNSSEC на удаленном DNS-сервере нельзя, можно отключить проверку DNSSEC на сервере AD. Для этого необходимо в файл /etc/bind/options.conf в секцию options добавить параметр:
+
+	 dnssec-validation no;
+
+>  И перезапустить службу DNS:
+
+	# systemctl restart bind.service
+
++ **Проверка конфигурации DNS**
+
+**На Samba DC:**
+
+1. Запись отвечающая за работу сервисов Kerberos через UDP и LDAP через TCP:
+
+		# dig +short -t SRV _kerberos._udp.test.alt
+		0 100 88 dc1.test.alt.
+		# dig +short -t SRV _ldap._tcp.test.alt
+		0 100 389 dc1.test.alt.
+
+В выводе команд должен быть отображен список всех серверов.
+
+2. Наличие записей для работы сервисов AD на DNS-сервере Samba:
+
+		# dig +short -t SRV _kerberos._tcp.dc._msdcs.win.dom
+		0 100 88 dc1.win.dom.
+		# dig +short -t SRV _ldap._tcp.dc._msdcs.win.dom
+		0 100 389 dc1.win.dom.
+
+3. Возможность получения билета Kerberos в домене WIN.DOM:
+
+		# kinit Администратор@WIN.DOM
+		# klist
+		Ticket cache: FILE:/tmp/krb5cc_500
+		Default principal: Администратор@WIN.DOM
+
+		Valid starting       Expires              Service principal
+		09.09.2024 15:49:11  10.09.2024 01:49:11  krbtgt/WIN.DOM@WIN.DOM
+			renew until 10.09.2024 15:49:01
+			
+**На Windows Server с AD:**
+
+1. Запустить утилиту nslookup.exe для поиска служебных записей:
+
+		C:\> nslookup.exe
+		> set type=SRV
+
+2. Ввести доменное имя для служебных записей Kerberos через UDP и LDAP через TCP:
+
+		> _kerberos._udp.test.alt
+		_kerberos._udp.test.alt       SRV service location:
+			priority                = 0
+			weight                  = 100
+			port                    = 88
+			svr hostname            = dc1.test.alt
+		…
+		test.alt
+			primary name server = dc1.test.alt
+			responsible mail addr = hostmaster.test.alt
+			serial = 7
+			refresh = 900 (15 mins)
+			retry = 600 (10 mins)
+			expire = 86400 (1 days)
+			default TTL = 3600 (1 hours)
+		> _ldap._tcp.test.alt
+		_ldap._tcp.test.alt       SRV service location:
+			priority                = 0
+			weight                  = 100
+			port                    = 389
+			svr hostname            = dc1.test.alt
+		…
+
+#### Создание двухстороннего транзитивного подключения
+
++ **на Samba DC**
+
+На контроллере домена dc1.test.alt:
+
+	# samba-tool domain trust create win.dom --type=forest --direction=both --create-location=both -Uадминистратор@WIN.DOM
+
+При появлении запроса необходимо ввести пароль администратора.
+
+> Для входа в доверенный домен через SSSD надо использовать тип связи external, а не forest.
+
+> В случае использования Trust Secret Key в параметре --create-location нужно заменить опцию both на local. Samba DC прежде чем создать доверительные отношения сначала запросит Trust Key (Incoming Trust Password/Outgoing Trust Password), созданный ранее при настройке в Windows.
+
+**На Windows Server с AD:**
 
 В домене win.dom открываем «Диспетчер серверов», и выбираем «Средства» — «Active Directory — Домены и Доверие»:
 
@@ -349,6 +485,49 @@ ___
 
 ![](trusts/completion.png)
 
+##### Проверка доверия
+
+Проверка доверия с dc1.test.alt:
+
++ просмотр доверия:
+
+		# samba-tool domain trust show WIN.DOM
+		LocalDomain Netbios[TEST] DNS[test.alt] SID[S-1-5-21-3099202228-3607437695-3279060739]
+		TrustedDomain:
+
+		NetbiosName:    WIN-DOM
+		DnsName:        win.dom
+		SID:            S-1-5-21-3096440084-565096806-4224734732
+		Type:           0x2 (UPLEVEL)
+		Direction:      0x3 (BOTH)
+		Attributes:     0x8 (FOREST_TRANSITIVE)
+		PosixOffset:    0x00000000 (0)
+		kerb_EncTypes:  0x18 (AES128_CTS_HMAC_SHA1_96,AES256_CTS_HMAC_SHA1_96)
+		Namespaces[2] TDO[win.dom]:
+		TLN: Status[Enabled]                  DNS[*.win.dom]
+		DOM: Status[Enabled]                  DNS[win.dom] Netbios[WIN-DOM] SID[S-1-5-21-3096440084-565096806-4224734732]
+
++ список трастов:
+
+		# samba-tool domain trust list
+		Type[Forest]   Transitive[Yes] Direction[BOTH]     Name[win.dom]
+
+В разных доменах могут быть разные результаты. Результат зависит от типа траста, который установлен с этим доменом.
+Если после настройки доверия возникли проблемы с доступом пользователей из трастового домен в свой домен, тогда следует проверить, действительно ли установлен траст:
+
+		# samba-tool domain trust validate win.dom -UАдминистратор@WIN.DOM
+		LocalDomain Netbios[TEST] DNS[test.alt] SID[S-1-5-21-3099202228-3607437695-3279060739]
+		LocalTDO Netbios[WIN-DOM] DNS[win.dom] SID[S-1-5-21-3096440084-565096806-4224734732]
+		OK: LocalValidation: DC[\\DC2.win.dom] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+		OK: LocalRediscover: DC[\\DC2.win.dom] CONNECTION[WERR_OK]
+		RemoteDC Netbios[DC2] DNS[DC2.win.dom] 		ServerType[PDC,GC,LDAP,DS,KDC,TIMESERV,CLOSEST,WRITABLE,FULL_SECRET_DOMAIN_6,ADS_WEB_SERVICE,DS_8,DS_9]
+		Password for [Администратор@WIN.DOM]:
+		OK: RemoteValidation: DC[\\dc1.test.alt] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+		OK: RemoteRediscover: DC[\\dc1.test.alt] CONNECTION[WERR_OK]
+
+
+Проверка доверия с dc2.win.dom:
+
 Проверку можно осуществить в свойствах домена WIN.DOM во вкладке «Отношения доверия».
 
 :![Отношения доверия](trusts/win-dom2.png)
@@ -357,48 +536,301 @@ ___
 
 ![Свойства](trusts/check_trust.png)
 
-Для подтверждения или сброса состояния этого отношениядоверия и для обновления его суффиксов маршрутизируемых имен необходимо нажать «Проверка»:
+Для подтверждения или сброса состояния этого отношения доверия и для обновления его суффиксов маршрутизируемых имен необходимо нажать «Проверка»:
 
 ![Результат проверки](trusts/result_check.png)
 
-### Samba DC с BIND9_DLZ
-+ **Настройка DNS**
-1. Создать сервер условной перессылки для службы DNS. При использовании DNS бэкенда BIND9_DLZ добавить в конец файла /etc/bind/options.conf (или /etc/bind/ddns.conf) строки:
 
-	  	zone "win.dom" in {
-	  		type forward;
-   			forwarders { 10.64.224.116; };
-  		};
+### Два домена Samba
 
-Подробнее про настройку домена можно прочесть в [документации ALT Linux Team](https://docs.altlinux.org/ru-RU/archive/9.0/html/alt-server/)
+| Имя домена  | Контроллер домена | IP-адрес      | ОС контроллера домена | Версия Samba |
+|-------------|-------------------|---------------|-----------------------|--------------|
+| TEST.ALT    | DC1.TEST.ALT      | 10.64.224.118 | ALT Server 10.2       | 4.19.7       |
+| EXAMPLE.ALT | DC2.TEST.ALT      | 10.64.224.117 | ALT Server 10.2       | 4.19.7       |
 
-И перезапустить службу DNS:
+#### Настройка DNS
+
++ Если используется **DNS бэкенд BIND9_DLZ**, необходимо добавить информацию о зоне в конец файла /etc/bind/options.conf:
+	
+	на контроллере домена dc1.test.alt добавить строки:
+	
+		zone "example.alt" {
+      		type forward;
+      		forwarders { 10.64.224.117; };
+		};
+		
+	на контроллере домена dc2.example.alt:
+	
+		zone "test.alt" {
+     		type forward;
+     		forwarders { 10.64.224.118; };
+		};	
+		
+	Перезапустить службу DNS:
+	
+		# systemctl restart bind.service
+
+> Если удалённый DNS-сервер не использует DNSSEC и включить проверку DNSSEC на удаленном DNS-сервере нельзя, можно отключить проверку DNSSEC на сервере AD. 
+Для этого необходимо в файле /etc/bind/options.conf в секцию options добавить параметр:
+
+	dnssec-validation no; 
+
+> И перезапустить службу DNS: 
 
 	# systemctl restart bind.service
 
-2. Проверяем возможность получения билета Kerberos в домене WIN.DOM:
++ Если используется **DC с DNS бэкенд SAMBA_INTERNAL**, самый простой способ заставить работать разрешение имен — настроить DNS-прокси между двумя доменами. DNS-прокси будет перенаправлять запрос между доменами и внешним DNS-серверами. В примере, в качестве DNS-прокси используется отдельный сервер (IP-адрес 192.168.0.150) с настроенным bind9.
 
-		# kinit Администратор@WIN.DOM
+На каждом контроллере домена необходимо:
+
+1. Указать DNS-прокси, как сервер пересылки в файле /etc/samba/smb.conf (в параметре dns forwarder). Например:
+
+		dns forwarder = 10.64.224.105 8.8.8.8
+
+2. Перезапустить службу samba:
+
+		# systemctl restart samba
+		
+На сервере bind9 отредактировать файл /etc/bind/options.conf:
+
++ отключить проверку DNSSEC, для этого в секцию options добавить параметр:
+
+		dnssec-validation no;
+		
++ в конец файла добавить информацию о зонах:
+
+		zone "example.alt" {
+      	type forward;
+   	  	forwarders { 10.64.224.117; };
+		};
+
+		zone "test.alt" {
+      	type forward;
+    		forwarders { 10.64.224.118; };
+		};
+		
+Перезапустить службу DNS:
+
+	# systemctl restart bind.service
+	
+##### Проверка конфигурации DNS
+
+Для проверки настройки следует убедиться, что на обоих контроллерах домена разрешаются SRV-записи:
+
++ на контроллере домена dc1.test.alt:
+
+		# host -t srv _kerberos._tcp.example.alt
+		_kerberos._tcp.example.alt has SRV record 0 100 88 dc2.example.alt.
+		# host -t srv _kerberos._tcp.test.alt
+		_kerberos._tcp.test.alt has SRV record 0 100 88 dc1.test.alt.
+		
++ на контроллере домена dc2.example.alt:
+
+		# host -t srv _kerberos._tcp.example.alt
+		_kerberos._tcp.test.alt has SRV record 0 100 88 dc2.example.alt.
+		# host -t srv _kerberos._tcp.test.alt
+		_kerberos._tcp.test.alt has SRV record 0 100 88 dc1.test.alt.
+		
+Проверка возможности получения билета Kerberos:
+
++ на контроллере домена dc1.test.alt:
+
+		# kinit administrator@EXAMPLE.ALT
+		Password for administrator@EXAMPLE.ALT:
 		# klist
-		Ticket cache: FILE:/tmp/krb5cc_500
-		Default principal: Администратор@WIN.DOM
+		Ticket cache: FILE:/tmp/krb5cc_0
+		Default principal: administrator@EXAMPLE.ALT
 
 		Valid starting       Expires              Service principal
-		09.09.2024 15:49:11  10.09.2024 01:49:11  krbtgt/WIN.DOM@WIN.DOM
-			renew until 10.09.2024 15:49:01
+		10.09.2024 16:48:51  11.09.2024 02:48:51  krbtgt/EXAMPLE.ALT@EXAMPLE.ALT
+			renew until 11.09.2024 16:48:47
+			
++ на контроллере домена dc1.test.alt:
 
-> Если удалённый DNS-сервер не использует DNSSEC и включить проверку DNSSEC на удаленном DNS-сервере нельзя, можно отключить проверку DNSSEC на сервере AD. Для этого необходимо в файл /etc/bind/options.conf в секцию options добавить параметр:
+		# kinit administrator@TEST.ALT
+		Password for administrator@TEST.ALT:
+		# klist
+		Ticket cache: KEYRING:persistent:0:0
+		Default principal: administrator@TEST.ALT
 
-	 dnssec-validation no;
+		Valid starting       Expires              Service principal
+		10.09.2024 14:02:21  11.09.2024 00:02:21  krbtgt/TEST.ALT@TEST.ALT
+			renew until 17.09.2024 14:02:17
+			
+> *Важно:* realm должен быть записан заглавными буквами.
 
->  И перезапустить службу DNS:
+#### Создание двухстороннего транзитивного подключения
 
-	# systemctl restart bind.service
-
-+ **Создание двухстороннего транзитивного подключения:**
+> Для входа в доверенный домен через SSSD надо использовать тип связи external, а не forest.
 
 На контроллере домена dc1.test.alt:
 
-	# samba-tool domain trust create win.dom --type=forest --direction=both --create-location=both -Uадминистратор@WIN.DOM
+		#  samba-tool domain trust create EXAMPLE.ALT --type=forest --direction=both --	create-location=both -U administrator@EXAMPLE.ALT
+		LocalDomain Netbios[TEST] DNS[test.alt] SID[S-1-5-21-3099202228-3607437695-3279060739]
+		RemoteDC Netbios[DC2] DNS[dc2.example.alt]
+		ServerType[PDC,GC,LDAP,DS,KDC,TIMESERV,CLOSEST,WRITABLE,GOOD_TIMESERV,FULL_SECRET_DOMAIN_6]
+		Password for [administrator@EXAMPLE.ALT]:
+		RemoteDomain Netbios[EXAMPLE] DNS[example.alt] SID[S-1-5-21-2126352409-2047936676-1054754669]
+		Creating remote TDO.
+		Remote TDO created.
+		Setting supported encryption types on remote TDO.
+		Creating local TDO.
+		Local TDO created
+		Setting supported encryption types on local TDO.
+		Setup local forest trust information...
+		Namespaces[2] TDO[example.alt]:
+		TLN: Status[Enabled]                  DNS[*.example.alt]
+		DOM: Status[Enabled]                  DNS[example.alt] Netbios[EXAMPLE] SID[S-1-5-21-2126352409-2047936676-1054754669]
+		Setup remote forest trust information...
+		Namespaces[2] TDO[test.alt]:
+		TLN: Status[Enabled]                  DNS[*.test.alt]
+		DOM: Status[Enabled]                  DNS[test.alt] Netbios[TEST] SID[S-1-5-21-3099202228-3607437695-3279060739]
+		Validating outgoing trust...
+		OK: LocalValidation: DC[\\dc2.example.alt] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+		Validating incoming trust...
+		OK: RemoteValidation: DC[\\dc1.test.alt] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+		Success.
 
-> Для входа в доверенный домен через SSSD надо использовать тип связи external, а не forest.
+Проверка доверия:
+
++ Просмотр доверия с dc1.test.alt:
+
+		[root@dc1 ~]# samba-tool domain trust show EXAMPLE.ALT
+		LocalDomain Netbios[TEST] DNS[test.alt] SID[S-1-5-21-3099202228-3607437695-3279060739]
+		TrustedDomain:
+
+		NetbiosName:    EXAMPLE
+		DnsName:        example.alt
+		SID:            S-1-5-21-2126352409-2047936676-1054754669
+		Type:           0x2 (UPLEVEL)
+		Direction:      0x3 (BOTH)
+		Attributes:     0x8 (FOREST_TRANSITIVE)
+		PosixOffset:    0x00000000 (0)
+		kerb_EncTypes:  0x18 (AES128_CTS_HMAC_SHA1_96,AES256_CTS_HMAC_SHA1_96)
+		Namespaces[2] TDO[example.alt]:
+		TLN: Status[Enabled]                  DNS[*.example.alt]
+		DOM: Status[Enabled]                  DNS[example.alt] Netbios[EXAMPLE] SID[S-1-5-21-2126352409-2047936676-1054754669]
+
++ Просмотр доверия с dc2.example.alt:
+
+		[root@dc2 ~]# samba-tool domain trust show TEST.ALT
+		LocalDomain Netbios[EXAMPLE] DNS[example.alt] SID[S-1-5-21-2126352409-2047936676-1054754669]
+		TrustedDomain:
+
+		NetbiosName:    TEST
+		DnsName:        test.alt
+		SID:            S-1-5-21-3099202228-3607437695-3279060739
+		Type:           0x2 (UPLEVEL)
+		Direction:      0x3 (BOTH)
+		Attributes:     0x8 (FOREST_TRANSITIVE)
+		PosixOffset:    0x00000000 (0)
+		kerb_EncTypes:  0x18 (AES128_CTS_HMAC_SHA1_96,AES256_CTS_HMAC_SHA1_96)
+		Namespaces[2] TDO[test.alt]:
+		TLN: Status[Enabled]                  DNS[*.test.alt]
+		DOM: Status[Enabled]                  DNS[test.alt] Netbios[TEST] SID[S-1-5-21-3099202228-3607437695-3279060739]
+
++ Список трастов:
+
+		[root@dc1 ~]# samba-tool domain trust list
+		Type[Forest]   Transitive[Yes] Direction[BOTH]     Name[example.alt]
+
+В разных доменах могут быть разные результаты. Результат зависит от типа траста, который установлен с этим доменом.
+
+Если после настройки доверия возникли проблемы с доступом пользователей из трастового домен в свой домен, тогда следует проверить, действительно ли установлен траст:
+
+	[root@dc1 ~]# samba-tool domain trust validate EXAMPLE.ALT -Uadministrator@EXAMPLE.ALT
+	LocalDomain Netbios[TEST] DNS[test.alt] SID[S-1-5-21-3099202228-3607437695-3279060739]
+	LocalTDO Netbios[EXAMPLE] DNS[example.alt] SID[S-1-5-21-2126352409-2047936676-1054754669]
+	OK: LocalValidation: DC[\\dc2.example.alt] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+	OK: LocalRediscover: DC[\\dc2.example.alt] CONNECTION[WERR_OK]
+	RemoteDC Netbios[DC2] DNS[dc2.example.alt] 	
+	ServerType[PDC,GC,LDAP,DS,KDC,TIMESERV,CLOSEST,WRITABLE,GOOD_TIMESERV,FULL_SECRET_DOMAIN_6]
+	Password for [administrator@EXAMPLE.ALT]:
+	OK: RemoteValidation: DC[\\dc1.test.alt] CONNECTION[WERR_OK] TRUST[WERR_OK] VERIFY_STATUS_RETURNED
+	OK: RemoteRediscover: DC[\\dc1.test.alt] CONNECTION[WERR_OK]
+
+## Управление пользователями и группами
+
+После настройки доверия можно назначать пользователей и группы из доверяющего домена в группу доверенного домена. Так как настроено двустороннее доверие, можно назначать пользователей и группы в обоих направлениях.
+
+> Предварительно необходимо создать несколько пользователей и групп в обоих доменах. Инструкцию можно найти в [документации ALT Linux Team](https://docs.altlinux.org/ru-RU/domain/10.2/html/samba/ch06.html#users-management)
+
+### Список пользователей и групп
+
+C помощью команды wbinfo можно получить список пользователей и групп только из своего домена (нельзя получить список пользователей и групп из доверяющего домена). Пример получения списка пользователей:
+
++ на контроллере домена dc1.test.alt:
+
+		# wbinfo -u --domain=TEST.ALT
+		TEST\administrator
+		TEST\guest
+		TEST\krbtgt
+		TEST\dns-dc1
+		TEST\ivanov
+
++ на контроллере домена dc2.example.alt:
+
+		# wbinfo -u --domain=EXAMPLE.ALT
+		EXAMPLE\administrator
+		EXAMPLE\guest
+		EXAMPLE\krbtgt
+		EXAMPLE\dns-dc2
+		EXAMPLE\petrov
+
+Для получения списка всех пользователей можно выполнить LDAP-запрос с помощью команды samba-tool. Пример получения списка пользователей из обоих доменов на контроллере домена dc1.test.alt:
+
+	# samba-tool user list -H ldap://dc1 -Uadministrator@TEST.ALT
+	Password for [administrator@TEST.ALT]:
+	dns-dc1
+	krbtgt
+	Guest
+	Administrator
+	ivanov
+
+	# samba-tool user list -H ldap://dc2 -Uadministrator@EXAMPLE.ALT
+	Password for [administrator@EXAMPLE.ALT]:
+	petrov
+	Administrator
+	krbtgt
+	dns-dc2
+	Guest
+
+Получение дополнительной информации о доменах (в примере команды выполняются на контроллере домена dc1.test.alt):
+
+	# wbinfo --all-domains
+	BUILTIN
+	TEST
+	EXAMPLE
+
+	# wbinfo --own-domain
+	TEST
+
+	# wbinfo --trusted-domains
+	BUILTIN
+	TEST
+	EXAMPLE
+
+	# wbinfo --online-status
+	BUILTIN : active connection
+	TEST : active connection
+	EXAMPLE : active connection
+
+Получение SID пользователей и групп (в примере команды выполняются на контроллере домена dc1.test.alt):
+
+	# wbinfo -n TEST\\ivanov
+	S-1-5-21-3099202228-3607437695-3279060739-1106 SID_USER (1)
+
+	# wbinfo -n EXAMPLE\\petrov
+	S-1-5-21-2126352409-2047936676-1054754669-1105 SID_USER (1)
+
+	# wbinfo -n TEST\\office
+	S-1-5-21-3099202228-3607437695-3279060739-1109 SID_DOM_GROUP (2)
+
+	# wbinfo -n EXAMPLE\\office2
+	S-1-5-21-3274802069-598906262-3677769431-1107 SID_DOM_GROUP (2)
+
+	# wbinfo -i TEST\\ivanov
+	TEST.ALT\ivanov:*:3000022:100::/home/TEST.ALT/ivanov:/bin/false
+
+	# wbinfo -i EXAMPLE\\kim
+	EXAMPLE\kim:*:3000020:3000021::/home/EXAMPLE/kim:/bin/false
