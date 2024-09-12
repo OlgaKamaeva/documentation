@@ -830,7 +830,7 @@ C помощью команды wbinfo можно получить список 
 	S-1-5-21-3274802069-598906262-3677769431-1107 SID_DOM_GROUP (2)
 
 	# wbinfo -i TEST\\ivanov
-	TEST.ALT\ivanov:*:3000022:100::/home/TEST.ALT/ivanov:/bin/false
+	TEST.ALT\ivanov:*:3000029:100::/home/TEST.ALT/ivanov:/bin/false
 
-	# wbinfo -i EXAMPLE\\kim
-	EXAMPLE\kim:*:3000020:3000021::/home/EXAMPLE/kim:/bin/false
+	# wbinfo -i EXAMPLE\\petrov
+	EXAMPLE\petrov:*:3000019:100::/home/EXAMPLE/petrov:/bin/false
