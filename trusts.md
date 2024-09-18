@@ -834,3 +834,99 @@ C помощью команды wbinfo можно получить список 
 
 	# wbinfo -i EXAMPLE\\petrov
 	EXAMPLE\petrov:*:3000019:100::/home/EXAMPLE/petrov:/bin/false
+
+### Тестирование аутентификации
+**На Samba DC**
+
+ С помощью команды **wbinfo** можно протестировать процесс аутентификации разных пользователей из обоих доменов.
+
+**wbinfo** попытается авторизовать пользователя. Первой проверкой будет аутентификация по паролю с открытым текстом. Этот тип аутентификации применяется, когда пользователь входит в систему локально (plaintext не означает, что пароль будет отправлен без шифрования, это просто название процесса входа в систему). Вторая проверка — аутентификация по паролю запрос/ответ. Этот тип аутентификации использует NTLM или Kerberos.
+
+Проверка методов аутентификации (в примере команды выполняются на контроллере домена dc1.test.alt):
+
+	# wbinfo -a TEST\\ivanov
+	Enter TEST\ivanov's password:
+	plaintext password authentication succeeded
+	Enter TEST\ivanov's password:
+	challenge/response password authentication succeeded
+
+
+	# wbinfo -a EXAMPLE\\petrov
+	Enter EXAMPLE\petrov's password:
+	plaintext password authentication succeeded
+	Enter EXAMPLE\petrov's password:
+	challenge/response password authentication succeeded
+
+
+Посмотреть какие контроллеры домена отвечают за аутентификацию:
+
+	# wbinfo --ping-dc
+	checking the NETLOGON for domain[TEST] dc connection to "dc1.test.alt" succeeded
+
+	# wbinfo --ping-dc --domain=EXAMPLE.ALT
+	checking the NETLOGON for domain[EXAMPLE.ALT] dc connection to "dc2.example.alt" succeeded
+
+Назначение пользователей и групп из доверенных доменов в группу доверяющего домена:
+
+	# wbinfo -n EXAMPLE\\petrov
+	S-1-5-21-2126352409-2047936676-1054754669-1105 SID_USER (1)
+
+	# samba-tool group addmembers office S-1-5-21-2126352409-2047936676-1054754669-1105
+	Added members to group office
+
+	# wbinfo -n EXAMPLE\\office2
+	S-1-5-21-2126352409-2047936676-1054754669-1106 SID_DOM_GROUP (2)
+
+	# samba-tool group addmembers office S-1-5-21-2126352409-2047936676-1054754669-1106
+	Added members to group office
+
+	# samba-tool group listmembers office
+	S-1-5-21-2126352409-2047936676-1054754669-1105
+	S-1-5-21-2126352409-2047936676-1054754669-1106
+
+**На Windows Server**
+
+В модуле RSAT «Active Directory — пользователи и компьютеры» («Active Directory — Users and Computers») можно просмотреть список пользователей группы:
+
+Для этого необходимо сменить домен:
+
+Выбираем «Пользователи и компьютеры Active Directory» и через «Действие» или правую кнопку мыши «Сменить домен...»:
+
+![AD](trusts/win-dom3.png)
+
+И просматриваем необходимую информацию:
+
+![AD](trusts/win-dom4.png)
+
+## Использование трастов на LINUX-клиентах
+
+> Если необходимо использовать пользователей из обоих доменов (установлены двухсторонние доверительные отношения с типом связи Лес), то рабочую станцию с ОС Альт следует вводить в домен через Winbind (см. [Подключение к AD с помощью Samba Winbind](https://docs.altlinux.org/ru-RU/domain/10.2/html/samba/client-winbind.html)).
+
+### Winbind
+
+На машине, введённой в домен, необходимо в файле smb.conf установить ID-маппинг для обоих доменов. Пример файла smb.conf на машине введённой в домен test.alt:
+
+	[global]
+        security = ads
+        realm = TEST.ALT
+        workgroup = TEST
+        netbios name = WS
+        template shell = /bin/bash
+        kerberos method = system keytab
+        wins support = no
+        winbind use default domain = yes
+        winbind enum users = no
+        winbind enum groups = no
+        template homedir = /home/%D/%U
+        winbind refresh tickets = yes
+        winbind offline logon = yes
+        idmap config * : range = 3000-7999
+        idmap config * : backend = tdb
+
+        idmap config TEST : backend = rid
+        idmap config TEST : range = 10000-999999
+        idmap config EXAMPLE : backend = rid
+        idmap config EXAMPLE : range = 1000000-9999999
+
+После перезапуска smbd, nmbd, winbind можно проверить, есть ли возможность просматривать пользователей из обоих доменов:
+
